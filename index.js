@@ -1,25 +1,48 @@
-// index.js
 const express = require("express");
 const bodyParser = require("body-parser");
 const crypto = require("crypto");
 const cors = require("cors");
+const fs = require("fs");
 
+/* ------------ Helper Functions for Saving/Loading the Chain ----------- */
+const CHAIN_FILE = "chain.json";
+
+function saveChain(chain) {
+  fs.writeFileSync(CHAIN_FILE, JSON.stringify(chain, null, 2));
+}
+
+function loadChain() {
+  if (!fs.existsSync(CHAIN_FILE)) return null;
+  try {
+    const data = fs.readFileSync(CHAIN_FILE);
+    return JSON.parse(data);
+  } catch {
+    return null;
+  }
+}
+
+/* ------------------------------ BLOCK CLASS ------------------------------ */
 class Block {
   constructor(index, timestamp, data, previousHash = "") {
     this.index = index;
     this.timestamp = timestamp;
-    this.data = data; //  ( { patientId, ecgStatus, aiResult })
+    this.data = data;
     this.previousHash = previousHash;
     this.nonce = 0;
     this.hash = this.calculateHash();
   }
 
   calculateHash() {
-    const str = this.index + this.previousHash + this.timestamp + JSON.stringify(this.data) + this.nonce;
+    const str =
+      this.index +
+      this.previousHash +
+      this.timestamp +
+      JSON.stringify(this.data) +
+      this.nonce;
+
     return crypto.createHash("sha256").update(str).digest("hex");
   }
 
-  // Mining بسيط لإظهار مفهوم Proof-of-Work (قابل التخفيض أو الإيقاف بالـ difficulty=0)
   mineBlock(difficulty) {
     const target = "0".repeat(difficulty);
     while (this.hash.substring(0, difficulty) !== target) {
@@ -29,10 +52,23 @@ class Block {
   }
 }
 
+/* ------------------------------ BLOCKCHAIN CLASS ------------------------------ */
 class SimpleBlockchain {
-  constructor(difficulty = 2) { // difficulty 2 يعني البلوك يبدأ بـ '00' — مناسب للعرض
-    this.chain = [this.createGenesisBlock()];
+  constructor(difficulty = 2) {
+    this.chain = this.loadOrCreateChain();
     this.difficulty = difficulty;
+  }
+
+  loadOrCreateChain() {
+    const saved = loadChain();
+    if (saved && Array.isArray(saved)) {
+      console.log("Loaded blockchain from chain.json");
+      return saved;
+    }
+    console.log("Creating new blockchain with Genesis Block...");
+    const genesis = [this.createGenesisBlock()];
+    saveChain(genesis);
+    return genesis;
   }
 
   createGenesisBlock() {
@@ -45,13 +81,14 @@ class SimpleBlockchain {
 
   addBlock(newBlock) {
     newBlock.previousHash = this.getLatestBlock().hash;
-    // Optional: mine block to demonstrate PoW concept
-    if (this.difficulty > 0) {
-      newBlock.mineBlock(this.difficulty);
-    } else {
-      newBlock.hash = newBlock.calculateHash();
-    }
+
+    if (this.difficulty > 0) newBlock.mineBlock(this.difficulty);
+    else newBlock.hash = newBlock.calculateHash();
+
     this.chain.push(newBlock);
+
+    // SAVE AFTER EACH ADD
+    saveChain(this.chain);
   }
 
   isChainValid() {
@@ -60,82 +97,80 @@ class SimpleBlockchain {
       const previous = this.chain[i - 1];
 
       if (current.hash !== current.calculateHash()) {
-        return { valid: false, reason: `Block ${current.index} hash mismatch` };
+        return { valid: false, reason: `Hash mismatch at block ${current.index}` };
       }
 
       if (current.previousHash !== previous.hash) {
-        return { valid: false, reason: `Block ${current.index} previousHash mismatch` };
+        return {
+          valid: false,
+          reason: `previousHash mismatch at block ${current.index}`,
+        };
       }
     }
+
     return { valid: true };
   }
 }
 
-/* ===== Express server setup ===== */
+/* ------------------------------ EXPRESS SERVER ------------------------------ */
 const app = express();
 app.use(bodyParser.json());
 app.use(cors());
 
-const port = process.env.PORT || 3000;
-const chain = new SimpleBlockchain(2); 
-
-/*
-Routes:
-POST  /addRecord    -> body: { patientId, ecgStatus, aiResult }  => يضيف بلوك
-GET   /getChain     -> يعيد السلسلة كاملة
-GET   /validate     -> يرجع نتيجة التحقق من صحة السلسلة
-GET   /latest       -> يعطي آخر بلوك
-*/
+const chain = new SimpleBlockchain(2);
+const port = 3000;
 
 app.get("/", (req, res) => {
-  res.send({
-    message: "Safe-Heart Blockchain Prototype (Node.js)",
+  res.json({
+    message: "Safe-Heart Blockchain Prototype",
     endpoints: {
       addRecord: "/addRecord (POST)",
       getChain: "/getChain (GET)",
       validate: "/validate (GET)",
-      latest: "/latest (GET)"
-    }
+      latest: "/latest (GET)",
+    },
   });
 });
 
-// Add a new record (block) with ECG/AI data
+/* ------------------------------ ROUTES ------------------------------ */
+
+// Add new ECG/AI record
 app.post("/addRecord", (req, res) => {
-  const { patientId, ecgStatus, aiResult, extra } = req.body || {};
+  const { patientId, ecgStatus, aiResult, extra } = req.body;
 
   if (!patientId || !ecgStatus) {
-    return res.status(400).json({ error: "patientId and ecgStatus are required" });
+    return res.status(400).json({
+      error: "patientId and ecgStatus are required",
+    });
   }
 
   const newIndex = chain.chain.length;
   const timestamp = new Date().toISOString();
-  const data = { patientId, ecgStatus, aiResult: aiResult || null, extra: extra || null };
+
+  const data = {
+    patientId,
+    ecgStatus,
+    aiResult: aiResult || null,
+    extra: extra || null,
+  };
 
   const block = new Block(newIndex, timestamp, data);
   chain.addBlock(block);
 
   res.json({
     message: "Block added successfully",
-    block: {
-      index: block.index,
-      timestamp: block.timestamp,
-      data: block.data,
-      previousHash: block.previousHash,
-      hash: block.hash,
-      nonce: block.nonce
-    }
+    block,
   });
 });
 
-// Return the whole chain
+// Get full chain
 app.get("/getChain", (req, res) => {
   res.json(chain.chain);
 });
 
-// Validate chain integrity
+// Validate chain
 app.get("/validate", (req, res) => {
-  const result = chain.isChainValid();
-  res.json(result);
+  res.json(chain.isChainValid());
 });
 
 // Latest block
@@ -144,5 +179,5 @@ app.get("/latest", (req, res) => {
 });
 
 app.listen(port, () => {
-  console.log(`Blockchain prototype running at http://localhost:${port}`);
+  console.log(`Blockchain running at http://localhost:${port}`);
 });
